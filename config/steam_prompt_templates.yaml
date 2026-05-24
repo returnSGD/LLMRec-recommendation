@@ -1,0 +1,85 @@
+# ============================================================
+# Steam-specific Prompt Templates for Text-to-Text Recommendation
+# Based on P5 / OpenP5 prompt paradigm
+# ============================================================
+
+# --- Sequential Recommendation (main task) ---
+sequential:
+  # Direct recommendation: given play history, predict next game
+  direct: |
+    The user has played the following games in order:
+    {item_sequence}
+
+    Considering the user's gaming preferences and play patterns,
+    what game should be recommended next? Answer with the game title only.
+
+  # Rating prediction style
+  rating: |
+    Based on the user's game history:
+    {item_sequence}
+
+    How likely is the user to enjoy the following game: {target_item}?
+    Rate from 1 (not at all) to 5 (very likely).
+
+  # Explanation style
+  explanation: |
+    The user has played: {item_sequence}
+    The next recommended game is: {target_item}
+
+    Explain why this game would be a good recommendation for this user,
+    based on their gaming history and preferences.
+
+# --- User Intent Summary ---
+intent_summary: |
+  The user played the following game:
+  Title: {title}
+  Genres: {genres}
+  Tags: {tags}
+
+  In one sentence, describe what kind of gaming need or intent
+  this purchase/play satisfies for the user.
+
+# --- Hard Negative Generation ---
+hard_negative: |
+  A user purchased and enjoyed this game:
+  Title: {title}
+  Genres: {genres}
+  Tags: {tags}
+  Description: {description}
+
+  Generate {count} alternative games that:
+  1. Belong to the same genre category
+  2. Have very similar core gameplay
+  3. BUT differ in at least one key aspect (e.g., theme, difficulty, price range,
+     indie vs AAA, single-player vs multiplayer)
+
+  For each alternative, provide only the game description in one sentence.
+  These should be games that a user might confuse with the original
+  but would NOT satisfy the exact same need.
+
+# --- Item Substitution ---
+item_substitution: |
+  The user's gaming intent in this session is: {intent}
+
+  Current game in the sequence:
+  Title: {title}
+  Genres: {genres}
+  Tags: {tags}
+
+  Suggest {count} alternative games that would satisfy the SAME intent.
+  They should be in the same genre but can be different titles.
+  Provide only the game descriptions, one per line.
+
+# --- Session Boundary Detection ---
+session_boundary: |
+  A user's gaming activity timeline:
+
+  {activity_timeline}
+
+  Based on the time gaps and genre shifts between consecutive games,
+  identify where the user's gaming sessions naturally divide.
+  Mark session boundaries with "--- SESSION BREAK ---".
+  A session break typically occurs when:
+  - There is a long time gap (> several days)
+  - The genre/style of games shifts significantly
+  - The user switches between single-player and multiplayer modes

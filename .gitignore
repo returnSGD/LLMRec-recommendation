@@ -1,0 +1,35 @@
+# Large data files
+data/*.json
+data/processed/
+data/cache/
+
+# Checkpoints & results
+checkpoints/
+results/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test scripts
+test_train.py
+fix_trainer.py
+patch*.py
+.claude/
