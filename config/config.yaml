@@ -1,0 +1,93 @@
+# ============================================================
+# LLM-Rec Sample Engineering — Main Configuration
+# ============================================================
+
+# --- Paths ---
+data:
+  raw_dir: "data/"
+  processed_dir: "data/processed/"
+  steam_games: "data/steam_games.json"
+  steam_user_items: "data/australian_users_items.json"
+  cache_dir: "data/cache/"
+
+# --- Model ---
+model:
+  base_model: "google/flan-t5-small"   # or google/flan-t5-small, google/flan-t5-large
+  max_seq_length: 256
+  max_output_length: 64
+  use_lora: false                      # set true for Qwen2.5-7B on 3060
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.1
+
+# --- Training ---
+training:
+  batch_size: 8                        # per GPU (T5-base fp32 fits on 3060 6GB)
+  gradient_accumulation_steps: 4
+  epochs: 5
+  learning_rate: 3.0e-4
+  warmup_steps: 200
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  fp16: false                          # fp32: avoids T5 NaN issues in fp16
+  seed: 42
+  eval_steps: 5000
+  save_steps: 10000
+  logging_steps: 50
+
+# --- RecCL: Curriculum Learning ---
+rec_cl:
+  enable: true
+  seq_difficulty_weight: 0.33          # α: sequence length/diversity difficulty
+  item_difficulty_weight: 0.33         # β: item popularity difficulty
+  pred_difficulty_weight: 0.34         # γ: CF model confidence difficulty
+  warmup_ratio: 0.3                    # first 30% training: focus on easy samples
+  transition_type: "linear"            # linear / exponential / sigmoid
+
+# --- SANS: Semantic-Aware Negative Sampling ---
+sans:
+  enable: true
+  easy_neg_count: 8
+  medium_neg_count: 4
+  hard_neg_count: 4
+  easy_weight: 0.1
+  medium_weight: 0.3
+  hard_weight: 0.6
+  temperature: 0.07
+  hard_neg_k: 5                       # retrieval top-k for hard negative matching
+  hard_neg_offset: 3                   # skip top-N most similar (too close to positive)
+
+# --- RecAug: Recommendation-Specific Augmentation ---
+rec_aug:
+  enable: true
+  aug_count: 2                         # number of augmented variants per sequence
+  consistency_lambda: 0.1              # λ for KL consistency loss
+  intent_truncation_ratio: 0.3         # max fraction of items to remove
+  session_gap_hours: 72                # time gap threshold for session boundary (hours)
+  substitution_prob: 0.2               # probability of LLM-guided substitution per item
+
+# --- LLM API (DeepSeek) ---
+llm_api:
+  provider: "deepseek"
+  base_url: "https://api.deepseek.com/anthropic"
+  api_key: "sk-421776ae0b67438293de665d44c9dae4"
+  model: "deepseek-chat"
+  max_tokens: 512
+  temperature: 0.7
+  request_interval: 1.0               # seconds between API calls (rate limiting)
+
+# --- Data Preprocessing ---
+preprocess:
+  k_core: 5                           # filter users/items with < k interactions
+  min_seq_len: 5                      # minimum sequence length for training
+  max_seq_len: 50                     # maximum items in a sequence
+  train_ratio: 0.8
+  valid_ratio: 0.1
+  test_ratio: 0.1
+  min_playtime: 0.0                   # filter items with playtime <= N minutes (0=keep all)
+
+# --- Evaluation ---
+eval:
+  top_k: [5, 10, 20]
+  tail_threshold: 50                  # items with < N interactions = "tail"
+  ood_check: true                     # check hallucinated game IDs
