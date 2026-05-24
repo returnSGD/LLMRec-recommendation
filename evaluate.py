@@ -16,7 +16,7 @@ import os
 import sys
 import json
 import argparse
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple
 from collections import Counter
 
 import numpy as np
@@ -58,25 +58,63 @@ class EvalDataset(Dataset):
         }
 
 
+def eval_collate_batch(batch):
+    """Custom collate: leaves prompt/target as lists of strings."""
+    result = {}
+    for key in batch[0].keys():
+        values = [b[key] for b in batch]
+        if key in ('prompt', 'target_text', 'user_id', 'target_item'):
+            result[key] = values
+        else:
+            result[key] = values  # keep as list
+    return result
+
+
 def load_model(checkpoint_path: str, base_model: str, device: torch.device) -> BaseP5Model:
     """Load trained model from checkpoint."""
     cfg = ModelConfig(base_model=base_model)
     model = BaseP5Model(cfg)
     model.to(device)
 
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.model.load_state_dict(ckpt['model_state_dict'])
     model.eval()
     return model
 
 
-def generate_recommendations(model: BaseP5Model, dataloader: DataLoader,
-                              device: torch.device, top_k: int = 20,
-                              item_titles: Dict[str, str] = None) -> Tuple[
-                                  List[List[str]], List[List[str]]]:
-    """Generate top-K recommendations for each user in the dataloader.
+def build_title_index(item_catalog: dict) -> Dict[str, str]:
+    """Build normalized title -> item ID lookup."""
+    index = {}
+    for iid, info in item_catalog.items():
+        title = info.get('title', iid)
+        # Normalize: lowercase, strip whitespace/punctuation
+        norm = title.strip().lower().rstrip('.')
+        index[norm] = iid
+        # Also store the original title in the catalog's title field
+        # for reverse lookup
+    return index
 
-    Returns: (predictions, ground_truths) — each is List[List[str]]
+
+def match_to_catalog(text: str, title_index: Dict[str, str],
+                     item_catalog: dict, default_id: str = '__UNK__') -> str:
+    """Match generated text to closest catalog item ID."""
+    norm = text.strip().lower().rstrip('.')
+    # Exact match after normalization
+    if norm in title_index:
+        return title_index[norm]
+    # Substring fallback
+    for norm_title, iid in title_index.items():
+        if norm_title in norm or norm in norm_title:
+            return iid
+    return default_id
+
+
+def generate_recommendations(model: BaseP5Model, dataloader: DataLoader,
+                              device: torch.device, top_k: int = 20) -> Tuple[
+                                  List[List[str]], List[List[str]]]:
+    """Generate recommendations and return item IDs (matched to catalog).
+
+    Returns: (predictions, ground_truths) — each is List[List[str]] of item IDs
     """
     all_predictions = []
     all_ground_truths = []
@@ -85,13 +123,13 @@ def generate_recommendations(model: BaseP5Model, dataloader: DataLoader,
     with torch.no_grad():
         for batch in tqdm(dataloader, desc='Evaluating'):
             prompts = batch['prompt']
-            targets = batch['target_text']
+            target_ids = batch['target_item']
+            target_texts = batch['target_text']
 
             tokenized = model.tokenize(prompts)
             input_ids = tokenized['input_ids'].to(device)
             attention_mask = tokenized['attention_mask'].to(device)
 
-            # Generate with beam search
             generated_ids = model.generate(
                 input_ids, attention_mask,
                 num_beams=5,
@@ -101,16 +139,13 @@ def generate_recommendations(model: BaseP5Model, dataloader: DataLoader,
             )
             generated_texts = model.decode(generated_ids)
 
-            all_predictions.append(generated_texts if isinstance(generated_texts, list)
-                                  else [generated_texts])
-            all_ground_truths.append([t] if isinstance(t, str) else list(t))
+            for gen_text, gt_id, gt_text in zip(generated_texts, target_ids, target_texts):
+                all_predictions.append([gen_text])
+                all_ground_truths.append([gt_id])
 
-    # Flatten if needed
-    predictions = []
-    ground_truths = []
-    for preds, gts in zip(all_predictions, all_ground_truths):
-        predictions.append(preds[:top_k] if isinstance(preds, list) else [preds])
-        ground_truths.append(gts[:1] if isinstance(gts, list) else [gts])
+    # Trim to top_k predictions per sample
+    predictions = [preds[:top_k] for preds in all_predictions]
+    ground_truths = [[gts[0]] for gts in all_ground_truths]
 
     return predictions, ground_truths
 
@@ -127,6 +162,8 @@ def main():
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--output', type=str, default=None,
                         help='Output JSON for metrics')
+    parser.add_argument('--max_eval', type=int, default=0,
+                        help='Max test samples to evaluate (0 = all)')
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -142,6 +179,10 @@ def main():
 
     print(f"Test samples: {len(test_samples)}, Items: {len(item_catalog)}")
 
+    if args.max_eval > 0:
+        test_samples = test_samples[:args.max_eval]
+        print(f"  Subsampled to {len(test_samples)} for quick eval")
+
     # Load model
     print(f"Loading model from {args.checkpoint}...")
     model = load_model(args.checkpoint, args.base_model, device)
@@ -155,13 +196,29 @@ def main():
     )
 
     test_dataset = EvalDataset(test_samples, item_catalog, prompt_template)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
+                              collate_fn=eval_collate_batch)
 
-    # Generate predictions
+    # Generate predictions (raw text)
     print("Generating recommendations...")
-    predictions, ground_truths = generate_recommendations(
+    raw_predictions, ground_truths = generate_recommendations(
         model, test_loader, device, top_k=max(args.top_k)
     )
+
+    # Build title -> ID index and match generated text to catalog
+    title_index = build_title_index(item_catalog)
+    predictions = []
+    ood_count = 0
+    for pred_texts in raw_predictions:
+        matched_ids = []
+        for text in pred_texts:
+            iid = match_to_catalog(text, title_index, item_catalog)
+            if iid == '__UNK__':
+                ood_count += 1
+            matched_ids.append(iid)
+        predictions.append(matched_ids)
+    total_preds = sum(len(p) for p in predictions)
+    print(f"  Matched: {total_preds - ood_count}/{total_preds} ({100*(1-ood_count/max(total_preds,1)):.1f}%)")
 
     # Prepare metric inputs
     catalog_ids = set(item_catalog.keys())

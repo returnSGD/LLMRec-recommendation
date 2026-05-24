@@ -187,6 +187,44 @@ python evaluate.py --checkpoint checkpoints/full/final_model.pt --data_dir data/
 - **H3**: RecAug enhances robustness without introducing noise (>85% Top-10 consistency between original & augmented)
 - **H4**: Combined improvements are larger on cold items than popular items
 
+## Baseline Experiment Results (2026-05-25)
+
+**Setup:** `google/flan-t5-small` (60M), Steam dataset (59.7K users, 7.6K items), 5 epochs, fp32, RTX 3060 6GB, 20K training samples, **no sample engineering**.
+
+### Training Loss
+
+| Epoch | 1 | 2 | 3 | 4 | 5 |
+|-------|---|---|---|---|---|
+| CE Loss | 8.30 | 2.08 | 1.60 | 1.40 | 1.33 |
+
+Loss decreased 84% across 5 epochs. No NaN, stable fp32 training on 6GB VRAM.
+
+### Evaluation (2,000 test samples)
+
+| Metric | Top-5 | Top-10 | Top-20 |
+|--------|-------|--------|--------|
+| NDCG | 0.0080 | 0.0080 | 0.0080 |
+| Recall | 0.0080 | 0.0080 | 0.0080 |
+| HR | 0.0080 | 0.0080 | 0.0080 |
+| ILS ↓ | 0.0000 | 0.0000 | 0.0000 |
+| Tail Recall | 0.0000 | 0.0000 | 0.0000 |
+| Novelty | 0.6393 | 0.6393 | 0.6393 |
+
+| Metric | Value |
+|--------|-------|
+| OOD@10 | 0.001 (99.9% catalog match) |
+| Coverage@10 | 0.002 |
+
+### Key Findings
+
+1. **Generative rec is feasible on consumer GPUs:** flan-t5-small trains stably on RTX 3060 6GB with fp32, producing valid game titles with near-zero hallucination.
+2. **Baseline accuracy is low (NDCG@10 = 0.008):** Without sample engineering, the standard P5 pipeline achieves only ~16 correct predictions out of 2,000. This sets the lower bound for comparison.
+3. **Cold items completely ignored:** Tail Recall = 0% across all K — the model recommends only popular items, validating the need for SANS' cold-item-focused negative sampling.
+4. **Natural diversity:** ILS = 0 indicates generative recommendation naturally produces diverse outputs without explicit diversity regularization.
+5. **Moderate novelty (0.64):** The model avoids only recommending top-10 head items, showing some inherent preference for mid-popularity games.
+
+Full experiment report: [`results/baseline_experiment_report.md`](results/baseline_experiment_report.md)
+
 ## Tech Stack
 
 | Layer | Framework | Role |

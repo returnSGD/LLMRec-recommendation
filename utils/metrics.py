@@ -23,7 +23,8 @@ def _dcg_at_k(scores: List[float], k: int) -> float:
 
 def ndcg_at_k(predicted: List[str], ground_truth: List[str], k: int) -> float:
     """NDCG@K: normalized discounted cumulative gain."""
-    relevance = [1.0 if item == gt else 0.0 for item in predicted[:k]]
+    gt_set = set(ground_truth)
+    relevance = [1.0 if item in gt_set else 0.0 for item in predicted[:k]]
     ideal = [1.0] * min(len(ground_truth), k)
     dcg = _dcg_at_k(relevance, k)
     idcg = _dcg_at_k(ideal, k)
