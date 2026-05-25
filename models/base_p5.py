@@ -56,10 +56,19 @@ class BaseP5Model(nn.Module):
 
         Returns dict with keys: loss, logits, encoder_last_hidden_state
         """
+        # T5 requires decoder_input_ids when labels is None and decoder is called
+        decoder_input_ids = None
+        if labels is None and output_hidden_states:
+            decoder_input_ids = torch.full(
+                (input_ids.size(0), 1), self.model.config.decoder_start_token_id,
+                dtype=torch.long, device=input_ids.device
+            )
+
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
+            decoder_input_ids=decoder_input_ids,
             output_hidden_states=output_hidden_states,
         )
         result = {'loss': outputs.loss, 'logits': outputs.logits}

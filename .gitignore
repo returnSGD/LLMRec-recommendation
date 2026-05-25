@@ -33,3 +33,6 @@ test_train.py
 fix_trainer.py
 patch*.py
 .claude/
+
+# Copyrighted Nature journal PDFs
+nature_journal/

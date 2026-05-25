@@ -260,34 +260,43 @@ def train_epoch(model: BaseP5Model, dataloader: DataLoader,
                     list(positive_ids)
                 )
 
-                # Get positive embeddings
-                pos_texts = [model.item_catalog.get(pid, {}).get('title', pid)
-                           for pid in positive_ids]
-                pos_embs = torch.stack([
-                    model.get_item_embedding_for_id(t) for t in pos_texts
-                ]).to(device)
+                # Fast lookup from pre-computed embedding cache
+                emb_cache = getattr(model, '_item_emb_cache', {})
+                pos_embs_list = []
+                for pid in positive_ids:
+                    if pid in emb_cache:
+                        pos_embs_list.append(emb_cache[pid])
+                    else:
+                        t = model.item_catalog.get(pid, {}).get('title', pid)
+                        pos_embs_list.append(model.get_item_embedding_for_id(t).cpu())
 
-                # Get negative embeddings
-                all_neg_embs = []
-                all_neg_wts = []
-                for i, (nids, wts) in enumerate(zip(neg_ids_list, neg_weights_list)):
-                    neg_texts = [model.item_catalog.get(nid, {}).get('title', nid)
-                               for nid in nids]
-                    neg_embs = torch.stack([
-                        model.get_item_embedding_for_id(t) for t in neg_texts
-                    ])
-                    all_neg_embs.append(neg_embs)
-                    all_neg_wts.append(torch.tensor(wts))
+                if pos_embs_list:
+                    pos_embs = torch.stack(pos_embs_list).to(device)
+                    all_neg_embs = []
+                    all_neg_wts = []
+                    for nids, wts in zip(neg_ids_list, neg_weights_list):
+                        neg_embs_list = []
+                        for nid in nids:
+                            if nid in emb_cache:
+                                neg_embs_list.append(emb_cache[nid])
+                            else:
+                                t = model.item_catalog.get(nid, {}).get('title', nid)
+                                neg_embs_list.append(
+                                    model.get_item_embedding_for_id(t).cpu()
+                                )
+                        if neg_embs_list:
+                            all_neg_embs.append(torch.stack(neg_embs_list))
+                            all_neg_wts.append(torch.tensor(wts))
 
-                if all_neg_embs:
-                    neg_embs_tensor = torch.stack(all_neg_embs).to(device)
-                    neg_wts_tensor = torch.stack(all_neg_wts).to(device)
-                    infonce_loss = weighted_infonce_loss(
-                        outputs['seq_embedding'], pos_embs,
-                        neg_embs_tensor, neg_wts_tensor,
-                        temperature=sans_sampler.tau,
-                    )
-                    total_loss_batch = total_loss_batch + infonce_loss
+                    if all_neg_embs:
+                        neg_embs_tensor = torch.stack(all_neg_embs).to(device)
+                        neg_wts_tensor = torch.stack(all_neg_wts).to(device)
+                        infonce_loss = weighted_infonce_loss(
+                            outputs['seq_embedding'], pos_embs,
+                            neg_embs_tensor, neg_wts_tensor,
+                            temperature=sans_sampler.tau,
+                        )
+                        total_loss_batch = total_loss_batch + infonce_loss
 
             # RecAug: consistency regularization
             if recaug_pipeline and 'seq_embedding' in outputs:
@@ -485,6 +494,19 @@ def main():
     model.to(device)
     print(f"Model: {config['model']['base_model']} "
           f"({sum(p.numel() for p in model.parameters()) / 1e6:.1f}M params)")
+
+    # Pre-compute item embeddings for fast InfoNCE (SANS)
+    if use_sample_engineering:
+        print("Pre-computing item embeddings...")
+        item_embeddings = {}
+        model.eval()
+        with torch.no_grad():
+            for iid, info in tqdm(item_catalog.items(), desc='Item embeddings'):
+                text = info.get('title', iid)
+                item_embeddings[iid] = model.get_item_embedding_for_id(text).cpu()
+        model.train()
+        model._item_emb_cache = item_embeddings
+        print(f"  Cached {len(item_embeddings)} item embeddings")
 
     # Make sampler for curriculum learning
     if curriculum_sampler:
