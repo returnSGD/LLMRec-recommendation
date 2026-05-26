@@ -45,6 +45,13 @@ class HardNegativeGenerator:
         self.cache_path = cache_path
         self.cache: Dict[str, List[str]] = {}
         self._load_cache()
+        # Check if LLM is actually available (anthropic package installed)
+        self._llm_available = False
+        try:
+            import anthropic
+            self._llm_available = True
+        except ImportError:
+            pass
 
     def _load_cache(self):
         if os.path.exists(self.cache_path):
@@ -64,8 +71,8 @@ class HardNegativeGenerator:
 
         Steps:
         1. Check cache
-        2. Call LLM to generate misleading-but-similar item descriptions
-        3. Use embedding retrieval to find closest real items in the catalog
+        2. Try LLM to generate misleading-but-similar item descriptions
+        3. Fallback: embedding-based retrieval (no LLM needed)
         4. Skip top-N closest (too similar), return next K
         """
         ck = self._cache_key(item_id)
@@ -75,28 +82,46 @@ class HardNegativeGenerator:
         if item_id not in self.item_texts:
             return []
 
-        # Step 1: LLM generates misleading item descriptions
-        item_desc = self.item_texts[item_id]
-        try:
-            llm_descriptions = self._call_llm_for_hard_negatives(item_desc, count * 2)
-        except Exception:
-            return []
-
-        # Step 2: Retrieve closest real items for each description
         hard_neg_ids = []
-        for desc in llm_descriptions:
-            retrieved = self._retrieve_similar_items(desc, top_k=10)
-            # Skip top 3 (too similar), take from 4-10
-            for rid in retrieved[3:]:
-                if rid != item_id and rid not in hard_neg_ids:
-                    hard_neg_ids.append(rid)
-                    break
-            if len(hard_neg_ids) >= count:
-                break
+
+        # Step 1: Try LLM-generated descriptions (only if anthropic is available)
+        if self._llm_available:
+            item_desc = self.item_texts[item_id]
+            try:
+                llm_descriptions = self._call_llm_for_hard_negatives(item_desc, count * 2)
+                for desc in llm_descriptions:
+                    retrieved = self._retrieve_similar_items(desc, top_k=10)
+                    for rid in retrieved[3:]:
+                        if rid != item_id and rid not in hard_neg_ids:
+                            hard_neg_ids.append(rid)
+                            break
+                    if len(hard_neg_ids) >= count:
+                        break
+            except Exception:
+                pass  # Fall through to embedding fallback
+
+        # Step 2: Embedding-based fallback (no LLM needed)
+        if not hard_neg_ids and self.item_embeddings and item_id in self.item_embeddings:
+            hard_neg_ids = self._embedding_fallback(item_id, count)
 
         self.cache[ck] = hard_neg_ids
         self._save_cache()
         return hard_neg_ids[:count]
+
+    def _embedding_fallback(self, item_id: str, count: int) -> List[str]:
+        """Use embedding similarity to find hard negatives without LLM.
+        Skip top-3 most similar (too close to positive), take next K."""
+        if item_id not in self.item_embeddings:
+            return []
+        pos_emb = self.item_embeddings[item_id]
+        sims = {}
+        for iid, emb in self.item_embeddings.items():
+            if iid != item_id:
+                sims[iid] = float(np.dot(pos_emb, emb) /
+                              (np.linalg.norm(pos_emb) * np.linalg.norm(emb) + 1e-10))
+        sorted_items = sorted(sims.items(), key=lambda x: x[1], reverse=True)
+        # Skip top 3 (too similar), take next K
+        return [iid for iid, _ in sorted_items[3:3 + count]]
 
     def _call_llm_for_hard_negatives(self, item_desc: str, count: int) -> List[str]:
         prompt = (
@@ -184,8 +209,8 @@ class LayeredNegativeSampler:
         all_neg_ids.extend(medium_negs)
         all_weights.extend([self.w_medium] * len(medium_negs))
 
-        # Hard negatives: LLM-generated
-        if self.hard_gen:
+        # Hard negatives: LLM-generated (skip if no hard negatives requested)
+        if self.hard_gen and self.K_hard > 0:
             hard_negs = self.hard_gen.generate_hard_negatives(positive_id, self.K_hard)
         else:
             hard_negs = []

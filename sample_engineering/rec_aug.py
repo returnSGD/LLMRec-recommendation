@@ -35,7 +35,7 @@ class SessionBoundaryDetector:
         """Detect session boundary indices.
 
         Args:
-            timestamps: list of unix timestamps for each interaction
+            timestamps: list of unix timestamps (or playtime hours as proxy)
             item_genres: optional genre tags for each item
             user_id: optional user_id for LLM-based detection
 
@@ -46,15 +46,27 @@ class SessionBoundaryDetector:
         if not timestamps or len(timestamps) < 2:
             return []
 
-        # Primary: time-gap detection
+        # Primary: gap-based detection (works with both timestamps and playtimes)
         boundaries = []
-        for i in range(1, len(timestamps)):
-            gap = timestamps[i] - timestamps[i - 1]
-            if gap > self.gap_threshold:
+        values = [float(t) for t in timestamps]
+        median_gap = np.median([abs(values[i] - values[i-1]) for i in range(1, len(values))]) if len(values) > 1 else 0
+        threshold = max(self.gap_threshold, median_gap * 3) if median_gap > 0 else self.gap_threshold
+
+        for i in range(1, len(values)):
+            gap = abs(values[i] - values[i - 1])
+            if gap > threshold:
                 boundaries.append(i)
 
+        # If no boundaries found with data, create artificial ones for augmentation
+        if not boundaries and len(values) >= 6:
+            # Split into 2-3 roughly equal sessions
+            n_sessions = random.randint(2, 3)
+            session_size = len(values) // n_sessions
+            for s in range(1, n_sessions):
+                boundaries.append(s * session_size)
+
         # Secondary: LLM genre-shift refinement (if available)
-        if self.llm and item_genres and len(boundaries) < len(timestamps) // 3:
+        if self.llm and item_genres and 0 < len(boundaries) < len(timestamps) // 3:
             refined = self._llm_refine_boundaries(timestamps, item_genres, boundaries)
             if refined:
                 boundaries = refined
@@ -283,25 +295,36 @@ class LLMGuidedSubstitution:
 
 
 class RecAugPipeline:
-    """Orchestrate all three RecAug operations with adaptive strategy selection."""
+    """Orchestrate all three RecAug operations with adaptive strategy selection.
+
+    active_ops: subset of ['trunc', 'perm', 'sub'] to enable.
+                None means all three enabled.
+    """
 
     def __init__(self, truncation: IntentPreservingTruncation,
                  permutation: SessionPermutation,
                  substitution: LLMGuidedSubstitution,
-                 substitution_prob: float = 0.2):
+                 substitution_prob: float = 0.2,
+                 active_ops: Optional[List[str]] = None):
         self.truncation = truncation
         self.permutation = permutation
         self.substitution = substitution
         self.sub_prob = substitution_prob
+        self.active_ops = active_ops  # None = all enabled
+
+    def _op_enabled(self, op: str) -> bool:
+        return self.active_ops is None or op in self.active_ops
 
     def _redundancy_score(self, sequence: List[str]) -> float:
-        """Estimate sequence redundancy. High redundancy → aggressive augmentation."""
+        """Estimate sequence redundancy. Falls back to length heuristic without LLM."""
         if len(sequence) <= 2:
             return 0.0
-        intents = [self.truncation.get_intent(item) for item in sequence]
-        # Count consecutive same-intent pairs
-        consecutive_same = sum(1 for i in range(1, len(intents)) if intents[i] == intents[i-1])
-        return consecutive_same / (len(sequence) - 1)
+        try:
+            intents = [self.truncation.get_intent(item) for item in sequence]
+            consecutive_same = sum(1 for i in range(1, len(intents)) if intents[i] == intents[i-1])
+            return consecutive_same / (len(sequence) - 1)
+        except Exception:
+            return min(0.5, len(sequence) / 100.0)
 
     def augment(self, sequence: List[str], timestamps: Optional[List[float]] = None,
                 item_genres: Optional[List[List[str]]] = None,
@@ -312,19 +335,18 @@ class RecAugPipeline:
             list of dicts: [{'sequence': [...], 'operations': ['truncate', 'permute']}, ...]
         """
         variants = []
-        redundancy = self._redundancy_score(sequence)
 
-        if redundancy > 0.3:
-            # High redundancy: truncation + substitution
-            truncated = self.truncation.truncate(sequence)
-            variants.append({'sequence': truncated, 'operations': ['truncate']})
+        # --- Truncation (LLM intent-preserving, or simple random-drop fallback) ---
+        if self._op_enabled('trunc'):
+            try:
+                truncated = self.truncation.truncate(sequence)
+            except Exception:
+                truncated = self._simple_truncate(sequence)
+            if truncated != sequence:
+                variants.append({'sequence': truncated, 'operations': ['truncate']})
 
-            if self.substitution and random.random() < self.sub_prob * redundancy:
-                subbed = self._apply_substitutions(truncated)
-                if subbed != truncated:
-                    variants.append({'sequence': subbed, 'operations': ['truncate', 'substitute']})
-        else:
-            # Low redundancy: session permutation only (keep all intent info)
+        # --- Session permutation (timestamps or playtime-based) ---
+        if self._op_enabled('perm'):
             if timestamps and len(timestamps) == len(sequence):
                 permuted = self.permutation.permute(
                     sequence, timestamps, item_genres, user_id
@@ -332,17 +354,31 @@ class RecAugPipeline:
                 if permuted != sequence:
                     variants.append({'sequence': permuted, 'operations': ['permute']})
 
-            # Always add a lightly-truncated variant
-            if len(sequence) > 4:
-                truncated = self.truncation.truncate(sequence, max_removal_ratio=0.15)
-                if truncated != sequence:
-                    variants.append({'sequence': truncated, 'operations': ['truncate_light']})
+        # --- LLM-guided substitution ---
+        if self._op_enabled('sub') and self.substitution:
+            if random.random() < self.sub_prob:
+                try:
+                    subbed = self._apply_substitutions(sequence)
+                    if subbed != sequence:
+                        variants.append({'sequence': subbed, 'operations': ['substitute']})
+                except Exception:
+                    pass
 
-        # Fallback: at least one variant
+        # Fallback: at least one variant (simple random drop)
         if not variants and len(sequence) > 2:
-            variants.append({'sequence': sequence.copy(), 'operations': ['identity']})
+            dropped = self._simple_truncate(sequence, max_removal_ratio=0.15)
+            variants.append({'sequence': dropped, 'operations': ['simple_drop']})
 
         return variants[:3]
+
+    def _simple_truncate(self, sequence: List[str], max_removal_ratio: float = 0.3) -> List[str]:
+        """Random item drop fallback — no LLM needed."""
+        if len(sequence) <= 3:
+            return sequence
+        max_remove = max(1, int(len(sequence) * max_removal_ratio))
+        n_remove = random.randint(1, max_remove)
+        indices = sorted(random.sample(range(len(sequence)), n_remove))
+        return [item for i, item in enumerate(sequence) if i not in indices]
 
     def _apply_substitutions(self, sequence: List[str]) -> List[str]:
         """Apply LLM-guided substitutions to some items in the sequence."""

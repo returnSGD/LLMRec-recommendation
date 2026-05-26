@@ -45,6 +45,7 @@ def get_paths(dataset: str) -> Dict[str, str]:
             "output_dir": os.path.join(ROOT, "checkpoints", "ablation", "steam"),
             "results_dir": os.path.join(ROOT, "results", "ablation"),
             "prompt_type": "game",
+            "base_model": "google/flan-t5-small",
         }
     else:
         return {
@@ -53,15 +54,20 @@ def get_paths(dataset: str) -> Dict[str, str]:
             "output_dir": os.path.join(ROOT, "checkpoints", "ablation", "goodreads"),
             "results_dir": os.path.join(ROOT, "results", "ablation", "goodreads"),
             "prompt_type": "book",
+            "base_model": "google/flan-t5-small",
         }
 
 
 def run_train_eval(dataset: str, mode: str, seed: int = 42,
                    overrides: Dict[str, str] = None,
-                   quick: bool = False) -> Optional[Dict]:
+                   experiment_id: str = None,
+                   quick: bool = False,
+                   max_train: int = None,
+                   epochs: int = None) -> Optional[Dict]:
     """Run training + evaluation for one config. Returns metrics dict."""
     paths = get_paths(dataset)
-    ckpt_dir = os.path.join(paths["output_dir"], f"{mode}_seed{seed}")
+    dir_name = f"{experiment_id}_seed{seed}" if experiment_id else f"{mode}_seed{seed}"
+    ckpt_dir = os.path.join(paths["output_dir"], dir_name)
     os.makedirs(ckpt_dir, exist_ok=True)
 
     # Build command
@@ -71,14 +77,26 @@ def run_train_eval(dataset: str, mode: str, seed: int = 42,
         "--mode", mode,
         "--data_dir", paths["data_dir"],
         "--output_dir", ckpt_dir,
+        "--seed", str(seed),
     ]
-    if quick:
+    if quick and max_train is None:
         cmd.extend(["--max_train", "500"])
+    if max_train is not None:
+        cmd.extend(["--max_train", str(max_train)])
+    if epochs is not None:
+        cmd.extend(["--epochs", str(epochs)])
+    if overrides:
+        for key, val in overrides.items():
+            cmd.extend([f"--{key}", str(val)])
+
+    env = os.environ.copy()
+    env["HF_HUB_OFFLINE"] = "1"
+    env["TRANSFORMERS_OFFLINE"] = "1"
 
     print(f"  Training: {mode} ({dataset})...")
     try:
         result = subprocess.run(cmd, cwd=ROOT, capture_output=True,
-                               text=True, timeout=3600)
+                               text=True, timeout=3600, env=env)
         if result.returncode != 0:
             print(f"    FAILED: {result.stderr[-200:]}")
             return None
@@ -98,12 +116,13 @@ def run_train_eval(dataset: str, mode: str, seed: int = 42,
         "--data_dir", paths["data_dir"],
         "--output", output_path,
         "--prompt_type", paths["prompt_type"],
+        "--base_model", paths["base_model"],
         "--max_eval", "1000",
     ]
 
     try:
         result = subprocess.run(eval_cmd, cwd=ROOT, capture_output=True,
-                               text=True, timeout=600)
+                               text=True, timeout=600, env=env)
         if result.returncode == 0 and os.path.exists(output_path):
             with open(output_path, "r") as f:
                 return json.load(f)
@@ -114,7 +133,8 @@ def run_train_eval(dataset: str, mode: str, seed: int = 42,
 
 # ── RecCL component ablation ─────────────────────────────────
 
-def ablation_reccl_3dim(dataset: str, quick: bool = False) -> Dict[str, Dict]:
+def ablation_reccl_3dim(dataset: str, quick: bool = False,
+                         max_train: int = None, epochs: int = None) -> Dict[str, Dict]:
     """Ablate each of RecCL's 3 difficulty dimensions individually.
 
     Modes:
@@ -129,20 +149,20 @@ def ablation_reccl_3dim(dataset: str, quick: bool = False) -> Dict[str, Dict]:
     print("=" * 60)
 
     configs = {
-        "base": None,  # no RecCL
-        "reccl_seq": {"alpha": 1.0, "beta": 0.0, "gamma": 0.0},
-        "reccl_item": {"alpha": 0.0, "beta": 1.0, "gamma": 0.0},
-        "reccl_pred": {"alpha": 0.0, "beta": 0.0, "gamma": 1.0},
-        "reccl_full": {"alpha": 0.33, "beta": 0.33, "gamma": 0.34},
+        "base": ("base", None),  # no RecCL at all
+        "reccl_seq":  ("ablation_reccl", {"reccl_alpha": "1.0", "reccl_beta": "0.0", "reccl_gamma": "0.0"}),
+        "reccl_item": ("ablation_reccl", {"reccl_alpha": "0.0", "reccl_beta": "1.0", "reccl_gamma": "0.0"}),
+        "reccl_pred": ("ablation_reccl", {"reccl_alpha": "0.0", "reccl_beta": "0.0", "reccl_gamma": "1.0"}),
+        "reccl_full": ("ablation_reccl", {"reccl_alpha": "0.33", "reccl_beta": "0.33", "reccl_gamma": "0.34"}),
     }
 
     results = {}
-    for name, weights in configs.items():
-        mode = "base" if name == "base" else "ablation_reccl"
-        # Note: for fine-grained control, we'd modify the config YAML before training.
-        # Here we run with the standard ablation_reccl mode and record.
+    for name, (mode, overrides) in configs.items():
         print(f"\n  --- {name} ---")
-        metrics = run_train_eval(dataset, mode, seed=42, quick=quick)
+        # Use variant name as experiment_id for unique checkpoint dir
+        metrics = run_train_eval(dataset, mode, seed=42, overrides=overrides,
+                                 experiment_id=name, quick=quick,
+                                 max_train=max_train, epochs=epochs)
         if metrics:
             results[name] = metrics
             print(f"    NDCG@10={metrics.get('NDCG@10', 0):.4f}, "
@@ -156,7 +176,8 @@ def ablation_reccl_3dim(dataset: str, quick: bool = False) -> Dict[str, Dict]:
 
 # ── SANS component ablation ──────────────────────────────────
 
-def ablation_sans_tiers(dataset: str, quick: bool = False) -> Dict[str, Dict]:
+def ablation_sans_tiers(dataset: str, quick: bool = False,
+                        max_train: int = None, epochs: int = None) -> Dict[str, Dict]:
     """Ablate SANS negative sampling tiers.
 
     Modes:
@@ -170,16 +191,20 @@ def ablation_sans_tiers(dataset: str, quick: bool = False) -> Dict[str, Dict]:
     print("=" * 60)
 
     configs = {
-        "base": "base",
-        "sans_easy": "ablation_sans",
-        "sans_em": "ablation_sans",
-        "sans_full": "ablation_sans",
+        "base": ("base", None, None),
+        "sans_easy": ("ablation_sans",
+                      {"sans_medium_count": "0", "sans_hard_count": "0"}, None),
+        "sans_em": ("ablation_sans",
+                    {"sans_hard_count": "0"}, None),
+        "sans_full": ("ablation_sans", None, None),
     }
 
     results = {}
-    for name, mode in configs.items():
+    for name, (mode, overrides, use_llm) in configs.items():
         print(f"\n  --- {name} ---")
-        metrics = run_train_eval(dataset, mode, seed=42, quick=quick)
+        metrics = run_train_eval(dataset, mode, seed=42, overrides=overrides,
+                                 experiment_id=name, quick=quick,
+                                 max_train=max_train, epochs=epochs)
         if metrics:
             results[name] = metrics
             print(f"    NDCG@10={metrics.get('NDCG@10', 0):.4f}, "
@@ -192,32 +217,34 @@ def ablation_sans_tiers(dataset: str, quick: bool = False) -> Dict[str, Dict]:
 
 # ── RecAug component ablation ────────────────────────────────
 
-def ablation_recaug_ops(dataset: str, quick: bool = False) -> Dict[str, Dict]:
+def ablation_recaug_ops(dataset: str, quick: bool = False,
+                        max_train: int = None, epochs: int = None) -> Dict[str, Dict]:
     """Ablate RecAug augmentation operations individually.
 
     Modes:
       - base: no augmentation
-      - recaug_trunc: intent-preserving truncation only
-      - recaug_perm:  session permutation only
-      - recaug_sub:   LLM-guided substitution only
-      - recaug_full:  all 3 operations
+      - recaug_perm:  session permutation only (LLM-free with playtime gaps)
+      - recaug_trunc: random-drop truncation only (LLM-free fallback)
+      - recaug_full:  all 3 operations (perm + trunc, no sub without LLM)
+    Note: LLM-guided substitution omitted (requires anthropic SDK + API).
     """
     print("\n" + "=" * 60)
     print("RecAug OPERATION ABLATION")
     print("=" * 60)
 
     configs = {
-        "base": "base",
-        "recaug_trunc": "ablation_recaug",
-        "recaug_perm": "ablation_recaug",
-        "recaug_sub": "ablation_recaug",
-        "recaug_full": "ablation_recaug",
+        "base": ("base", None),
+        "recaug_perm": ("ablation_recaug", {"recaug_ops": "perm"}),
+        "recaug_trunc": ("ablation_recaug", {"recaug_ops": "trunc"}),
+        "recaug_full": ("ablation_recaug", {"recaug_ops": "perm,trunc"}),
     }
 
     results = {}
-    for name, mode in configs.items():
+    for name, (mode, overrides) in configs.items():
         print(f"\n  --- {name} ---")
-        metrics = run_train_eval(dataset, mode, seed=42, quick=quick)
+        metrics = run_train_eval(dataset, mode, seed=42, overrides=overrides,
+                                 experiment_id=name, quick=quick,
+                                 max_train=max_train, epochs=epochs)
         if metrics:
             results[name] = metrics
             print(f"    NDCG@10={metrics.get('NDCG@10', 0):.4f}, "
@@ -230,7 +257,8 @@ def ablation_recaug_ops(dataset: str, quick: bool = False) -> Dict[str, Dict]:
 
 # ── Hyperparameter sensitivity ───────────────────────────────
 
-def sensitivity_warmup_ratio(dataset: str, quick: bool = False) -> Dict[float, Dict]:
+def sensitivity_warmup_ratio(dataset: str, quick: bool = False,
+                             max_train: int = None, epochs: int = None) -> Dict[float, Dict]:
     """Sweep RecCL warmup_ratio ∈ [0.1, 0.7]."""
     print("\n" + "=" * 60)
     print("RecCL WARMUP RATIO SENSITIVITY")
@@ -241,9 +269,10 @@ def sensitivity_warmup_ratio(dataset: str, quick: bool = False) -> Dict[float, D
 
     for r in ratios:
         print(f"\n  --- warmup_ratio={r} ---")
-        # In practice: modify config YAML, run training, evaluate
-        # Placeholder: run with default and note value
-        metrics = run_train_eval(dataset, "ablation_reccl", seed=42, quick=quick)
+        overrides = {"reccl_warmup_ratio": str(r)}
+        metrics = run_train_eval(dataset, "ablation_reccl", seed=42,
+                                 overrides=overrides, quick=quick,
+                                 max_train=max_train, epochs=epochs)
         if metrics:
             results[r] = metrics
             print(f"    NDCG@10={metrics.get('NDCG@10', 0):.4f}")
@@ -251,7 +280,8 @@ def sensitivity_warmup_ratio(dataset: str, quick: bool = False) -> Dict[float, D
     return results
 
 
-def sensitivity_sans_tau(dataset: str, quick: bool = False) -> Dict[float, Dict]:
+def sensitivity_sans_tau(dataset: str, quick: bool = False,
+                         max_train: int = None, epochs: int = None) -> Dict[float, Dict]:
     """Sweep SANS temperature τ ∈ [0.01, 0.15]."""
     print("\n" + "=" * 60)
     print("SANS TEMPERATURE SENSITIVITY")
@@ -262,7 +292,10 @@ def sensitivity_sans_tau(dataset: str, quick: bool = False) -> Dict[float, Dict]
 
     for tau in taus:
         print(f"\n  --- tau={tau} ---")
-        metrics = run_train_eval(dataset, "ablation_sans", seed=42, quick=quick)
+        overrides = {"sans_temperature": str(tau)}
+        metrics = run_train_eval(dataset, "ablation_sans", seed=42,
+                                 overrides=overrides, quick=quick,
+                                 max_train=max_train, epochs=epochs)
         if metrics:
             results[tau] = metrics
             print(f"    NDCG@10={metrics.get('NDCG@10', 0):.4f}")
@@ -343,6 +376,10 @@ def main():
     parser.add_argument("--dataset", type=str, default="steam",
                         choices=["steam", "goodreads", "both"])
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--max_train", type=int, default=None,
+                        help="Max training samples (overrides --quick)")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Override number of epochs")
     parser.add_argument("--skip_reccl", action="store_true")
     parser.add_argument("--skip_sans", action="store_true")
     parser.add_argument("--skip_recaug", action="store_true")
@@ -359,17 +396,22 @@ def main():
         all_results = {}
 
         if not args.skip_reccl:
-            all_results["ablation_reccl"] = ablation_reccl_3dim(dataset, args.quick)
+            all_results["ablation_reccl"] = ablation_reccl_3dim(
+                dataset, args.quick, max_train=args.max_train, epochs=args.epochs)
 
         if not args.skip_sans:
-            all_results["ablation_sans"] = ablation_sans_tiers(dataset, args.quick)
+            all_results["ablation_sans"] = ablation_sans_tiers(
+                dataset, args.quick, max_train=args.max_train, epochs=args.epochs)
 
         if not args.skip_recaug:
-            all_results["ablation_recaug"] = ablation_recaug_ops(dataset, args.quick)
+            all_results["ablation_recaug"] = ablation_recaug_ops(
+                dataset, args.quick, max_train=args.max_train, epochs=args.epochs)
 
         if not args.skip_sensitivity:
-            all_results["warmup_ratio"] = sensitivity_warmup_ratio(dataset, args.quick)
-            all_results["sans_tau"] = sensitivity_sans_tau(dataset, args.quick)
+            all_results["warmup_ratio"] = sensitivity_warmup_ratio(
+                dataset, args.quick, max_train=args.max_train, epochs=args.epochs)
+            all_results["sans_tau"] = sensitivity_sans_tau(
+                dataset, args.quick, max_train=args.max_train, epochs=args.epochs)
 
         # Generate report
         paths = get_paths(dataset)

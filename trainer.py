@@ -141,6 +141,7 @@ def build_sans_components(item_catalog: Dict[str, Dict],
         llm_client=llm_client,
         item_texts=item_texts,
         item_genres=item_genres,
+        item_embeddings=None,  # populated later via model._item_emb_cache
         cache_path=config.get('cache_dir', 'data/cache/hard_negatives.json'),
     )
 
@@ -169,7 +170,8 @@ def build_sans_components(item_catalog: Dict[str, Dict],
 
 def build_recaug_pipeline(item_catalog: Dict[str, Dict],
                           llm_client: LLMClient,
-                          config: Dict) -> RecAugPipeline:
+                          config: Dict,
+                          active_ops: List[str] = None) -> RecAugPipeline:
     """Build RecAug pipeline with all three augmentors."""
     item_texts = {}
     for iid, info in item_catalog.items():
@@ -206,6 +208,7 @@ def build_recaug_pipeline(item_catalog: Dict[str, Dict],
         permutation=permutation,
         substitution=substitution,
         substitution_prob=recaug_cfg.get('substitution_prob', 0.2),
+        active_ops=active_ops,
     )
 
 
@@ -303,9 +306,11 @@ def train_epoch(model: BaseP5Model, dataloader: DataLoader,
                 # Generate augmented variants
                 aug_variants = []
                 for i, seq in enumerate(batch['sequence']):
+                    # Use playtimes as proxy timestamps for session boundary detection
+                    playtimes = batch.get('playtimes', [None] * len(seq))[i] if 'playtimes' in batch else None
                     variants = recaug_pipeline.augment(
                         seq,
-                        timestamps=None,  # no timestamps; use genre-shift detection
+                        timestamps=playtimes if playtimes and len(playtimes) == len(seq) else None,
                     )
                     if variants:
                         aug_variants.append(variants[0]['sequence'])
@@ -415,6 +420,22 @@ def main():
                         help='Random seed (overrides config seed)')
     parser.add_argument('--epochs', type=int, default=None,
                         help='Override number of epochs (for quick runs)')
+    parser.add_argument('--reccl_alpha', type=float, default=None,
+                        help='Override RecCL seq_difficulty_weight (α)')
+    parser.add_argument('--reccl_beta', type=float, default=None,
+                        help='Override RecCL item_difficulty_weight (β)')
+    parser.add_argument('--reccl_gamma', type=float, default=None,
+                        help='Override RecCL pred_difficulty_weight (γ)')
+    parser.add_argument('--reccl_warmup_ratio', type=float, default=None,
+                        help='Override RecCL warmup_ratio')
+    parser.add_argument('--sans_temperature', type=float, default=None,
+                        help='Override SANS temperature τ')
+    parser.add_argument('--sans_hard_count', type=int, default=None,
+                        help='Override SANS hard negative count (0=disable)')
+    parser.add_argument('--sans_medium_count', type=int, default=None,
+                        help='Override SANS medium negative count (0=disable)')
+    parser.add_argument('--recaug_ops', type=str, default=None,
+                        help='Comma-separated RecAug ops: trunc,perm,sub (default: all)')
     args = parser.parse_args()
 
     # Load config
@@ -448,6 +469,22 @@ def main():
     if args.max_train:
         train_samples = train_samples[:args.max_train]
         print(f"  (limited to {args.max_train} samples for quick mode)")
+
+    # Apply CLI overrides for RecCL parameters (component ablation)
+    if args.reccl_alpha is not None:
+        config['rec_cl']['seq_difficulty_weight'] = args.reccl_alpha
+    if args.reccl_beta is not None:
+        config['rec_cl']['item_difficulty_weight'] = args.reccl_beta
+    if args.reccl_gamma is not None:
+        config['rec_cl']['pred_difficulty_weight'] = args.reccl_gamma
+    if args.reccl_warmup_ratio is not None:
+        config['rec_cl']['warmup_ratio'] = args.reccl_warmup_ratio
+    if args.sans_temperature is not None:
+        config['sans']['temperature'] = args.sans_temperature
+    if args.sans_hard_count is not None:
+        config['sans']['hard_neg_count'] = args.sans_hard_count
+    if args.sans_medium_count is not None:
+        config['sans']['medium_neg_count'] = args.sans_medium_count
 
     # Determine which methods to enable
     use_reccl = args.mode in ('full', 'ablation_reccl')
@@ -488,29 +525,31 @@ def main():
     llm_client = None
 
     if use_sample_engineering:
-        # Load .env file if present (local development convenience)
-        _maybe_load_dotenv()
-
-        llm_cfg = config.get('llm_api', {})
-        api_key = (
-            os.environ.get('DEEPSEEK_API_KEY')
-            or llm_cfg.get('api_key', '')
-        )
-        if not api_key:
-            print("WARNING: DEEPSEEK_API_KEY not set. Set env var or configure in YAML. "
-                  "LLM-dependent features (SANS hard negatives, RecAug intent analysis) "
-                  "will fall back to basic behavior.")
-        llm_client = LLMClient(
-            base_url=os.environ.get('DEEPSEEK_BASE_URL',
-                                    llm_cfg.get('base_url', 'https://api.deepseek.com/anthropic')),
-            api_key=api_key,
-            model=os.environ.get('DEEPSEEK_MODEL',
-                                 llm_cfg.get('model', 'deepseek-chat')),
-            max_tokens=llm_cfg.get('max_tokens', 512),
-            temperature=llm_cfg.get('temperature', 0.7),
-            request_interval=llm_cfg.get('request_interval', 1.0),
-        )
-        print("LLM client initialized for sample engineering")
+        # LLM client only needed for SANS (hard negatives) and RecAug (intent analysis)
+        llm_needed = use_sans or use_recaug
+        if llm_needed:
+            # Load .env file if present (local development convenience)
+            _maybe_load_dotenv()
+            llm_cfg = config.get('llm_api', {})
+            api_key = (
+                os.environ.get('DEEPSEEK_API_KEY')
+                or llm_cfg.get('api_key', '')
+            )
+            if not api_key:
+                print("WARNING: DEEPSEEK_API_KEY not set. Set env var or configure in YAML. "
+                      "LLM-dependent features (SANS hard negatives, RecAug intent analysis) "
+                      "will fall back to basic behavior.")
+            llm_client = LLMClient(
+                base_url=os.environ.get('DEEPSEEK_BASE_URL',
+                                        llm_cfg.get('base_url', 'https://api.deepseek.com/anthropic')),
+                api_key=api_key,
+                model=os.environ.get('DEEPSEEK_MODEL',
+                                     llm_cfg.get('model', 'deepseek-chat')),
+                max_tokens=llm_cfg.get('max_tokens', 512),
+                temperature=llm_cfg.get('temperature', 0.7),
+                request_interval=llm_cfg.get('request_interval', 1.0),
+            )
+            print("LLM client initialized for sample engineering")
 
         if use_reccl:
             scorer = build_difficulty_scorer(item_catalog, item_popularity, train_samples)
@@ -540,7 +579,11 @@ def main():
             print("SANS layered negative sampler initialized")
 
         if use_recaug:
-            recaug_pipeline = build_recaug_pipeline(item_catalog, llm_client, config)
+            recaug_ops_list = None
+            if args.recaug_ops is not None:
+                recaug_ops_list = [op.strip() for op in args.recaug_ops.split(',')]
+            recaug_pipeline = build_recaug_pipeline(item_catalog, llm_client, config,
+                                                    active_ops=recaug_ops_list)
             print("RecAug pipeline initialized")
 
     # Build model
@@ -562,6 +605,9 @@ def main():
         model.train()
         model._item_emb_cache = item_embeddings
         print(f"  Cached {len(item_embeddings)} item embeddings")
+        # Wire embeddings into SANS hard negative generator for LLM-free fallback
+        if sans_sampler and sans_sampler.hard_gen:
+            sans_sampler.hard_gen.item_embeddings = item_embeddings
 
     # Make sampler for curriculum learning
     if curriculum_sampler:
