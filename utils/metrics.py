@@ -143,3 +143,39 @@ def compute_all_metrics(predictions: List[List[str]],
     metrics['OOD@10'] = ood_rate(predictions, catalog_ids, 10)
 
     return metrics
+
+
+def compute_per_sample_metrics(predictions: List[List[str]],
+                                ground_truths: List[List[str]],
+                                item_genres: Dict[str, List[str]],
+                                item_popularity: Dict[str, int],
+                                catalog_ids: Set[str],
+                                tail_items: Set[str],
+                                k_values: List[int] = [5, 10, 20]) -> Dict[str, List[float]]:
+    """Compute per-sample (per-user) metrics for statistical testing.
+
+    Returns a dict mapping metric_name -> list of per-sample values,
+    where each value corresponds to one test sample's metric.
+    This enables paired t-tests, ANOVA, and effect size computation.
+    """
+    max_pop = max(item_popularity.values()) if item_popularity else 1
+    n_samples = len(predictions)
+    per_sample = {}
+
+    for k in k_values:
+        per_sample[f'NDCG@{k}'] = [ndcg_at_k(p, g, k) for p, g in zip(predictions, ground_truths)]
+        per_sample[f'Recall@{k}'] = [recall_at_k(p, g, k) for p, g in zip(predictions, ground_truths)]
+        per_sample[f'HR@{k}'] = [hit_rate_at_k(p, g, k) for p, g in zip(predictions, ground_truths)]
+        per_sample[f'ILS@{k}'] = [intra_list_similarity(p, item_genres, k) for p in predictions]
+        per_sample[f'Tail_Recall@{k}'] = [tail_recall_at_k(p, g, k, tail_items)
+                                          for p, g in zip(predictions, ground_truths)]
+        per_sample[f'Novelty@{k}'] = [novelty_at_k(p, item_popularity, max_pop, k) for p in predictions]
+
+    # Coverage and OOD are global metrics, not per-sample — still include for reference
+    per_sample['Coverage@10'] = [coverage_at_k(predictions, len(catalog_ids), 10)] * n_samples
+    per_sample['OOD@10'] = [ood_rate(predictions, catalog_ids, 10)] * n_samples
+
+    # Add sample index for traceability
+    per_sample['_sample_idx'] = list(range(n_samples))
+
+    return per_sample

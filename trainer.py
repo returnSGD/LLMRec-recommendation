@@ -370,6 +370,32 @@ def train_epoch(model: BaseP5Model, dataloader: DataLoader,
 # Main
 # ============================================================
 
+def _maybe_load_dotenv(dotenv_path: str = ".env"):
+    """Load .env file into os.environ if it exists (no external dependency)."""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), dotenv_path)
+    if not os.path.isfile(env_path):
+        return
+    with open(env_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, _, value = line.partition('=')
+            key, value = key.strip(), value.strip()
+            if value and key not in os.environ:
+                os.environ[key] = value
+
+
+def set_seed(seed: int):
+    """Set all random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def main():
     parser = argparse.ArgumentParser(description='Train LLM-Rec model')
     parser.add_argument('--config', type=str, default='config/config.yaml',
@@ -385,11 +411,26 @@ def main():
                         help='Device: cuda or cpu')
     parser.add_argument('--max_train', type=int, default=None,
                         help='Max training samples (for quick runs)')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed (overrides config seed)')
+    parser.add_argument('--epochs', type=int, default=None,
+                        help='Override number of epochs (for quick runs)')
     args = parser.parse_args()
 
     # Load config
     with open(args.config, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
+
+    # Override seed from CLI (for multi-seed experiments)
+    if args.seed is not None:
+        config['training']['seed'] = args.seed
+    if args.epochs is not None:
+        config['training']['epochs'] = args.epochs
+
+    # Set all random seeds
+    seed = config['training'].get('seed', 42)
+    set_seed(seed)
+    print(f"Random seed: {seed}")
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -425,13 +466,14 @@ def main():
         lora_dropout=config['model'].get('lora_dropout', 0.1),
     )
 
-    # Prompt template
-    prompt_template = (
+    # Prompt template (configurable, defaults to games)
+    prompt_cfg = config.get("prompt", {})
+    prompt_template = prompt_cfg.get("template",
         "The user has played the following games in order:\n"
         "{item_sequence}\n\n"
         "Considering the user's gaming preferences and play patterns, "
         "what game should be recommended next? Answer with the game title only."
-    )
+    ).strip()
 
     # Dataset & Dataloader
     dataset = SteamSequenceDataset(
@@ -446,11 +488,24 @@ def main():
     llm_client = None
 
     if use_sample_engineering:
+        # Load .env file if present (local development convenience)
+        _maybe_load_dotenv()
+
         llm_cfg = config.get('llm_api', {})
+        api_key = (
+            os.environ.get('DEEPSEEK_API_KEY')
+            or llm_cfg.get('api_key', '')
+        )
+        if not api_key:
+            print("WARNING: DEEPSEEK_API_KEY not set. Set env var or configure in YAML. "
+                  "LLM-dependent features (SANS hard negatives, RecAug intent analysis) "
+                  "will fall back to basic behavior.")
         llm_client = LLMClient(
-            base_url=llm_cfg.get('base_url', 'https://api.deepseek.com/anthropic'),
-            api_key=llm_cfg.get('api_key', ''),
-            model=llm_cfg.get('model', 'deepseek-chat'),
+            base_url=os.environ.get('DEEPSEEK_BASE_URL',
+                                    llm_cfg.get('base_url', 'https://api.deepseek.com/anthropic')),
+            api_key=api_key,
+            model=os.environ.get('DEEPSEEK_MODEL',
+                                 llm_cfg.get('model', 'deepseek-chat')),
             max_tokens=llm_cfg.get('max_tokens', 512),
             temperature=llm_cfg.get('temperature', 0.7),
             request_interval=llm_cfg.get('request_interval', 1.0),

@@ -1,0 +1,101 @@
+# ============================================================
+# LLM-Rec Sample Engineering — Goodreads Configuration
+# Cross-dataset validation config
+# ============================================================
+
+# --- Paths ---
+data:
+  raw_dir: "data_validation/"
+  processed_dir: "data/goodreads_processed/"
+  cache_dir: "data/cache_goodreads/"
+
+# --- Model ---
+model:
+  base_model: "google/flan-t5-small"
+  max_seq_length: 256
+  max_output_length: 64
+  use_lora: false
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.1
+
+# --- Prompt template (book-specific) ---
+prompt:
+  template: >
+    The user has read the following books in order:
+    {item_sequence}
+
+    Considering the user's reading preferences and patterns,
+    what book should be recommended next? Answer with the book title only.
+
+# --- Training ---
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 4
+  epochs: 5
+  learning_rate: 3.0e-4
+  warmup_steps: 200
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  fp16: false
+  seed: 42
+  eval_steps: 5000
+  save_steps: 10000
+  logging_steps: 50
+
+# --- RecCL: Curriculum Learning ---
+rec_cl:
+  enable: true
+  seq_difficulty_weight: 0.33
+  item_difficulty_weight: 0.33
+  pred_difficulty_weight: 0.34
+  warmup_ratio: 0.3
+  transition_type: "linear"
+
+# --- SANS: Semantic-Aware Negative Sampling ---
+sans:
+  enable: true
+  easy_neg_count: 8
+  medium_neg_count: 4
+  hard_neg_count: 4
+  easy_weight: 0.1
+  medium_weight: 0.3
+  hard_weight: 0.6
+  temperature: 0.07
+  hard_neg_k: 5
+  hard_neg_offset: 3
+
+# --- RecAug: Recommendation-Specific Augmentation ---
+rec_aug:
+  enable: true
+  aug_count: 2
+  consistency_lambda: 0.1
+  intent_truncation_ratio: 0.3
+  session_gap_hours: 72
+  substitution_prob: 0.2
+
+# --- LLM API (DeepSeek) ---
+llm_api:
+  provider: "deepseek"
+  base_url: "https://api.deepseek.com/anthropic"
+  api_key: ""   # Set DEEPSEEK_API_KEY env var or fill in here
+  model: "deepseek-chat"
+  max_tokens: 512
+  temperature: 0.7
+  request_interval: 1.0
+
+# --- Data Preprocessing ---
+preprocess:
+  k_core: 5
+  min_seq_len: 5
+  max_seq_len: 50
+  train_ratio: 0.8
+  valid_ratio: 0.1
+  test_ratio: 0.1
+  min_playtime: 0.0
+
+# --- Evaluation ---
+eval:
+  top_k: [5, 10, 20]
+  tail_threshold: 50
+  ood_check: true

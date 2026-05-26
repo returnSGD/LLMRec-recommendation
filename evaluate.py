@@ -164,6 +164,13 @@ def main():
                         help='Output JSON for metrics')
     parser.add_argument('--max_eval', type=int, default=0,
                         help='Max test samples to evaluate (0 = all)')
+    parser.add_argument('--prompt_type', type=str, default='game',
+                        choices=['game', 'book'],
+                        help='Prompt template type (game or book)')
+    parser.add_argument('--config', type=str, default=None,
+                        help='YAML config file (reads prompt template)')
+    parser.add_argument('--save_per_sample', type=str, default=None,
+                        help='Path to save per-sample metrics JSON (for statistical tests)')
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -188,12 +195,26 @@ def main():
     model = load_model(args.checkpoint, args.base_model, device)
     model.item_catalog = item_catalog
 
-    # Build test dataset
-    prompt_template = (
-        "The user has played the following games in order:\n"
-        "{item_sequence}\n\n"
-        "what game should be recommended next? Answer with the game title only."
-    )
+    # Build test dataset (uses config prompt or prompt_type)
+    prompt_template = None
+    if args.config:
+        import yaml
+        with open(args.config, 'r', encoding='utf-8') as f:
+            eval_config = yaml.safe_load(f)
+        prompt_template = eval_config.get("prompt", {}).get("template", "").strip()
+    if not prompt_template:
+        if args.prompt_type == 'book':
+            prompt_template = (
+                "The user has read the following books in order:\n"
+                "{item_sequence}\n\n"
+                "what book should be recommended next? Answer with the book title only."
+            )
+        else:
+            prompt_template = (
+                "The user has played the following games in order:\n"
+                "{item_sequence}\n\n"
+                "what game should be recommended next? Answer with the game title only."
+            )
 
     test_dataset = EvalDataset(test_samples, item_catalog, prompt_template)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
@@ -260,11 +281,28 @@ def main():
     print(f"\n  Coverage@10: {metrics.get('Coverage@10', 0):.4f}")
     print(f"  OOD@10:       {metrics.get('OOD@10', 0):.4f}")
 
-    # Save
+    # Save aggregated metrics
     if args.output:
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(metrics, f, indent=2)
         print(f"\nMetrics saved to {args.output}")
+
+    # Save per-sample metrics for statistical tests
+    if args.save_per_sample:
+        from utils.metrics import compute_per_sample_metrics
+        per_sample = compute_per_sample_metrics(
+            predictions=predictions,
+            ground_truths=ground_truths,
+            item_genres=item_genres,
+            item_popularity=item_popularity,
+            catalog_ids=catalog_ids,
+            tail_items=tail_items,
+            k_values=args.top_k,
+        )
+        os.makedirs(os.path.dirname(args.save_per_sample) if os.path.dirname(args.save_per_sample) else '.', exist_ok=True)
+        with open(args.save_per_sample, 'w', encoding='utf-8') as f:
+            json.dump(per_sample, f, indent=2)
+        print(f"Per-sample metrics saved to {args.save_per_sample}")
 
 
 if __name__ == '__main__':

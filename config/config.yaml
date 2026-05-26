@@ -70,7 +70,7 @@ rec_aug:
 llm_api:
   provider: "deepseek"
   base_url: "https://api.deepseek.com/anthropic"
-  api_key: "sk-421776ae0b67438293de665d44c9dae4"
+  api_key: ""   # Set DEEPSEEK_API_KEY env var or fill in here
   model: "deepseek-chat"
   max_tokens: 512
   temperature: 0.7

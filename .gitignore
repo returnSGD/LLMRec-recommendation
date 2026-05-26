@@ -28,6 +28,13 @@ build/
 .DS_Store
 Thumbs.db
 
+# Environment variables (credentials)
+.env
+
+# Data validation (large raw data)
+data_validation/*.json.gz
+data_validation/*.csv
+
 # Test scripts
 test_train.py
 fix_trainer.py
