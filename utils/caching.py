@@ -97,9 +97,6 @@ class LLMClient:
                  temperature: Optional[float] = None,
                  system_prompt: str = "You are a helpful assistant that analyzes video game data.") -> str:
         """Generate text from LLM. Simple single-turn completion."""
-        import time
-        time.sleep(self.request_interval)  # rate limiting
-
         response = self.client.messages.create(
             model=self.model,
             max_tokens=max_tokens or self.max_tokens,
@@ -107,4 +104,6 @@ class LLMClient:
             system=system_prompt,
             messages=[{"role": "user", "content": prompt}],
         )
+        import time
+        time.sleep(self.request_interval)  # rate limiting after successful call
         return response.content[0].text
