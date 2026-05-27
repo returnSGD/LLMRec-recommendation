@@ -96,7 +96,7 @@ def run_train_eval(dataset: str, mode: str, seed: int = 42,
     print(f"  Training: {mode} ({dataset})...")
     try:
         result = subprocess.run(cmd, cwd=ROOT, capture_output=True,
-                               text=True, timeout=3600, env=env)
+                               text=True, timeout=7200, env=env)
         if result.returncode != 0:
             print(f"    FAILED: {result.stderr[-200:]}")
             return None
