@@ -1,0 +1,113 @@
+# ============================================================
+# LLM-Rec — Tesla V100 16GB Optimized Configuration
+# Cross-dataset validation: Goodreads
+#
+# GPU: Tesla V100 16GB VRAM (Volta, Tensor Cores)
+# CPU: 25-core Xeon Platinum 8470Q
+# RAM: 90GB
+# CUDA: 12.x (V100 max)
+# ============================================================
+
+# --- Paths ---
+data:
+  raw_dir: "data/"
+  processed_dir: "data/goodreads_processed/"
+  cache_dir: "data/cache_goodreads/"
+
+# --- Model ---
+# flan-t5-base (~250M params, ~500MB fp16) fits well on 16GB
+# flan-t5-large (~800M) would OOM, use LoRA if needed
+model:
+  base_model: "google/flan-t5-base"
+  max_seq_length: 512
+  max_output_length: 128
+  use_lora: false
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.1
+
+# --- Prompt template (book-specific) ---
+prompt:
+  template: >
+    The user has read the following books in order:
+    {item_sequence}
+
+    Considering the user's reading preferences and patterns,
+    what book should be recommended next? Answer with the book title only.
+
+# --- Training (V100 16GB optimized) ---
+# Memory breakdown (flan-t5-base, fp16):
+#   Model weights:  ~0.5 GB
+#   Optimizer:      ~1.5 GB (Adam fp32 copies)
+#   Activations:    ~10-12 GB (bs=24, seq=512)
+#   Headroom:       ~2-3 GB
+training:
+  batch_size: 24                       # safe for 16GB with seq_len=512
+  gradient_accumulation_steps: 2       # effective batch = 48
+  epochs: 10
+  learning_rate: 3.0e-4
+  warmup_steps: 500
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  fp16: true                           # V100 Tensor Cores excel at fp16
+  seed: 42
+  eval_steps: 5000
+  save_steps: 10000
+  logging_steps: 50
+
+# --- RecCL: Curriculum Learning ---
+rec_cl:
+  enable: true
+  seq_difficulty_weight: 0.33
+  item_difficulty_weight: 0.33
+  pred_difficulty_weight: 0.34
+  warmup_ratio: 0.3
+  transition_type: "linear"
+
+# --- SANS: Semantic-Aware Negative Sampling ---
+sans:
+  enable: true
+  easy_neg_count: 10                   # scaled for effective batch 48
+  medium_neg_count: 5
+  hard_neg_count: 5
+  easy_weight: 0.1
+  medium_weight: 0.3
+  hard_weight: 0.6
+  temperature: 0.07
+  hard_neg_k: 5
+  hard_neg_offset: 3
+
+# --- RecAug: Recommendation-Specific Augmentation ---
+rec_aug:
+  enable: true
+  aug_count: 2
+  consistency_lambda: 0.1
+  intent_truncation_ratio: 0.3
+  session_gap_hours: 72
+  substitution_prob: 0.2
+
+# --- LLM API (DeepSeek) ---
+llm_api:
+  provider: "deepseek"
+  base_url: "https://api.deepseek.com/anthropic"
+  api_key: ""   # Set DEEPSEEK_API_KEY env var or fill in here
+  model: "deepseek-chat"
+  max_tokens: 512
+  temperature: 0.7
+  request_interval: 1.0
+
+# --- Data Preprocessing ---
+preprocess:
+  k_core: 5
+  min_seq_len: 5
+  max_seq_len: 50
+  train_ratio: 0.8
+  valid_ratio: 0.1
+  test_ratio: 0.1
+  min_playtime: 0.0
+
+# --- Evaluation ---
+eval:
+  top_k: [5, 10, 20]
+  tail_threshold: 50
+  ood_check: true

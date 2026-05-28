@@ -35,6 +35,10 @@ Thumbs.db
 data_validation/*.json.gz
 data_validation/*.csv
 
+# Deploy data files (too large for git)
+deploy/data/*.csv
+deploy/data/*.json.gz
+
 # Test scripts
 test_train.py
 fix_trainer.py
